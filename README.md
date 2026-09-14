@@ -1,5 +1,8 @@
 # fusion-ibom-export
 
+<img width="299" height="157" alt="image" src="https://github.com/user-attachments/assets/9266d9c9-ef51-40ba-a1f3-b851edcb8302" />
+
+
 Export the board open in Fusion 360's Electronics workspace to an
 EAGLE-compatible `.brd` file and generate an
 [Interactive HTML BOM](https://github.com/openscopeproject/InteractiveHtmlBom)
