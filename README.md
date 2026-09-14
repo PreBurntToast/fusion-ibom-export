@@ -1,4 +1,7 @@
 # fusion-ibom-export
+
+Uses https://github.com/openscopeproject/InteractiveHtmlBom and puts an internal script function so you dont have to use a console and type any commands to use it for knuckle dragging mechanical engineers like me.
+
 **Automating the .brd export from Fusion 360:** if you're working in Fusion
 360's Electronics workspace, you can skip the manual File > Export step —
 [PreBurntToast](https://github.com/PreBurntToast)'s
