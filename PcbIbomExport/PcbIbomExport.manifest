@@ -1,0 +1,10 @@
+{
+    "autodeskProduct": "Fusion360",
+    "type": "addin",
+    "author": "",
+    "description": {
+        "": "Export the open PCB to EAGLE format and generate an Interactive HTML BOM"
+    },
+    "supportedOS": "windows|mac",
+    "editEnabled": true
+}
