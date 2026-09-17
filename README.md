@@ -1,5 +1,7 @@
 # fusion-ibom-export
 
+<img width="299" height="157" alt="image" src="https://github.com/user-attachments/assets/9266d9c9-ef51-40ba-a1f3-b851edcb8302" />
+
 Export the board open in Fusion 360's Electronics workspace to an
 EAGLE-compatible `.brd` file and generate an
 [Interactive HTML BOM](https://github.com/openscopeproject/InteractiveHtmlBom)
@@ -116,16 +118,21 @@ command if it can't find it.
 
 InteractiveHtmlBom supports many more options than just where to save the
 file — drawing copper tracks, adding extra columns from your component
-data, dark mode, and more. Both `fusion_ibom_export.py` and
-`PcbIbomExport/PcbIbomExport.py` have an `EXTRA_IBOM_ARGS` list near the
-top you can edit by hand to add any of ibom's command-line flags, e.g.:
+data, dark mode, and more.
 
-```python
-EXTRA_IBOM_ARGS = ["--include-tracks", "--include-nets"]
-```
+- **Add-in:** clicking the button shows a dialog with checkboxes for the
+  common options (include tracks, include nets, dark mode, extra fields)
+  — no file editing needed.
+- **Script:** `fusion_ibom_export.py` has an `EXTRA_IBOM_ARGS` list near
+  the top you can edit by hand to add any of ibom's command-line flags:
 
-See the comment above that constant in either file for more examples, or
-the full flag list in
+  ```python
+  EXTRA_IBOM_ARGS = ["--include-tracks", "--include-nets"]
+  ```
+
+Both have an `EXTRA_IBOM_ARGS`-style escape hatch for anything not
+covered by the add-in's dialog. See the comment above that constant in
+either file for more examples, or the full flag list in
 [ibom's own wiki](https://github.com/openscopeproject/InteractiveHtmlBom/wiki/Usage).
 
 ## Why not just run the ibom script directly?
