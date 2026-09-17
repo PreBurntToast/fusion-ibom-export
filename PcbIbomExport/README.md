@@ -61,14 +61,35 @@ reopen Fusion first if something isn't behaving as expected after an edit.
 ## Requirements
 
 Same as the plain script — [InteractiveHtmlBom](https://github.com/openscopeproject/InteractiveHtmlBom)
-installed for the same Python interpreter Fusion uses:
+installed for a **standalone Python on your system PATH**, not Fusion's
+own bundled Python (Fusion embeds Python inside its own process rather
+than launching a separate `python.exe`, so there's nothing to install
+into there):
 
 ```
-pip install InteractiveHtmlBom wxpython jsonschema
+# Windows
+py -m pip install InteractiveHtmlBom wxpython jsonschema
+
+# Mac/Linux
+python3 -m pip install InteractiveHtmlBom wxpython jsonschema
 ```
 
-The add-in will tell you the exact command (with the correct interpreter
-path) if it can't find it.
+The add-in will show you this exact command if it can't find
+InteractiveHtmlBom.
+
+## Customizing BOM options
+
+InteractiveHtmlBom supports many more options than just where to save the
+file — drawing copper tracks, adding extra columns from your component
+data, dark mode, and more. Edit the `EXTRA_IBOM_ARGS` list near the top
+of `PcbIbomExport.py` to add any of ibom's command-line flags, e.g.:
+
+```python
+EXTRA_IBOM_ARGS = ["--include-tracks", "--include-nets"]
+```
+
+See the comment above that constant for more examples, or the full flag
+list in [ibom's own wiki](https://github.com/openscopeproject/InteractiveHtmlBom/wiki/Usage).
 
 ## A known limitation, worth knowing about
 

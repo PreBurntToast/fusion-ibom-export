@@ -6,10 +6,13 @@ WHAT THIS DOES, IN PLAIN TERMS:
 This add-in puts a button called "Interactive HTML BOM" on its own tab in
 the toolbar of Fusion's PCB (Board Layout) editor. Click the button, and
 it will:
-  1. Export the PCB you currently have open to an EAGLE-format ".brd" file
+  1. Show a small dialog with checkboxes for a few commonly wanted BOM
+     options (include copper tracks, include nets, dark mode) and a text
+     field for extra fields.
+  2. Export the PCB you currently have open to an EAGLE-format ".brd" file
      (a file format, not related to the word "board" as in lumber -- it's
      just the standard file extension for this kind of PCB data).
-  2. Hand that file to a separate, free command-line tool called
+  3. Hand that file to a separate, free command-line tool called
      "InteractiveHtmlBom" (ibom for short), which reads it and produces a
      single self-contained HTML web page -- a Bill of Materials you can
      open in any browser, where clicking a part in the list highlights it
@@ -50,22 +53,24 @@ FILE STRUCTURE, TOP TO BOTTOM:
 # specific, it's just general-purpose Python plumbing.
 
 import os            # Working with file paths and folders.
+import json          # Custom events (see section 4) can only carry a
+                      # plain string as their payload, not a Python list
+                      # directly -- json.dumps()/loads() converts our
+                      # list of ibom flags to and from that string form.
 import shutil        # shutil.which() finds a program on the system PATH;
                       # shutil.rmtree() deletes a folder and everything in it.
 import subprocess     # Lets Python launch a *separate* program (in our case,
                       # the ibom command-line tool) and wait for it to finish.
-import sys            # Gives us sys.executable -- the exact path to the
-                      # Python interpreter Fusion itself is using.
 import tempfile       # Creates a scratch folder in the OS's temp directory
                       # for files we only need briefly.
 import traceback      # Turns a Python error into a readable multi-line
                       # string, so we can show it in a message box instead
                       # of the add-in just silently failing.
 
-# These two are Fusion-specific. "adsk" is Autodesk's namespace for its
-# whole API; adsk.core is the general application/UI layer (windows,
-# toolbars, dialogs, commands); adsk.electron is the newer, PCB/Electronics-
-# specific layer (boards, schematics, exporting to EAGLE format, etc).
+# These are Fusion-specific. adsk.core is the general application/UI
+# layer (windows, toolbars, dialogs, commands); adsk.electron is the
+# newer, PCB/Electronics-specific layer (boards, schematics, exporting to
+# EAGLE format, etc).
 import adsk.core
 import adsk.electron
 
@@ -118,6 +123,34 @@ _placement = None   # Will become a 3-item tuple: (workspace, tab, panel)
 CMD_ID = 'pcbIbomExportCmd'
 CMD_NAME = 'Interactive HTML BOM'
 CMD_TOOLTIP = 'Export the open PCB and run InteractiveHtmlBom on it'
+
+# --- Extra, always-on customization for this add-in ---
+# Clicking the button now shows a small dialog with checkboxes for the
+# most commonly wanted InteractiveHtmlBom options (include tracks,
+# include nets, dark mode) and a text field for extra fields -- see
+# CommandCreatedHandler and CommandExecutedHandler further down for how
+# that dialog gets built and read. This list is an escape hatch for
+# anything the dialog *doesn't* cover: less common ibom flags you always
+# want applied, regardless of what's checked in the dialog. Whatever's
+# here gets combined with the dialog's selections every time.
+# --dest-dir and --name-format are already handled separately, further
+# down in run_ibom_pipeline() -- don't add those here.
+#
+# Full flag list: run `generate_interactive_bom --help` in a terminal, or
+# see the project's wiki: https://github.com/openscopeproject/InteractiveHtmlBom/wiki/Usage
+#
+# WHY THE DIALOG DOESN'T JUST USE ibom's OWN --show-dialog OPTION, WHICH
+# SHOWS A CHECKBOX WINDOW FOR EVERY SETTING ibom HAS: that comes with
+# three real problems, discovered and reported by a user named
+# Funkenjaeger while testing it as a possible fix for this exact request:
+# in dialog mode ibom ignores our --dest-dir and --name-format entirely
+# and picks its own default folder and filename instead; there's no way
+# to tell whether the user clicked Cancel or actually finished, since
+# both look the same to us; and it leaves an extra temporary copy of the
+# .brd file sitting in the output folder afterward. Building our own
+# small dialog with just the commonly wanted options, using Fusion's own
+# CommandInputs instead of ibom's, avoids all three.
+EXTRA_IBOM_ARGS: list = []
 
 # Where to find the icon image files for the button. This is a RELATIVE
 # path (relative to wherever this .py file itself lives), which Fusion
@@ -247,24 +280,125 @@ def _attempt_placement():
 #
 #   CommandCreatedHandler: fires ONCE, the very first time Fusion is
 #   about to actually run our command (i.e., right after the user clicks
-#   the button for the first time in a session). Its only job here is to
-#   attach the SECOND handler below to this specific instance of the
-#   command.
+#   the button for the first time in a session). Its job here is TWO
+#   things: build the little checkbox dialog the user sees, and attach
+#   the SECOND handler below so we find out what they chose.
 #
 #   CommandExecutedHandler: fires every time the button is actually
-#   clicked and the command runs to completion. THIS is where we call our
-#   real function, export_and_generate_bom().
+#   clicked, the dialog is filled in, and the user clicks OK. THIS is
+#   where we read back what got checked, and call our real function,
+#   export_and_generate_bom().
 #
 # Every notify() method below is wrapped in a try/except block. This is a
 # safety net: if anything inside goes wrong, instead of Fusion silently
 # swallowing the error (which is genuinely how it behaves by default,
 # leaving you no idea why nothing happened), we catch the error ourselves
 # and pop up a message box with the full details.
+#
+# WHY A DIALOG HERE, RATHER THAN JUST A PYTHON CONSTANT LIKE
+# EXTRA_IBOM_ARGS ABOVE: this add-in's whole selling point is one-click
+# convenience -- editing a Python file to change a checkbox-shaped
+# setting defeats that. Since we already have a real Fusion "Command"
+# wired up for the button, adding proper checkboxes to it costs very
+# little extra code and matches what people actually expect from a GUI
+# tool. EXTRA_IBOM_ARGS is still here as an escape hatch for anything the
+# dialog doesn't cover (odd one-off flags, for instance), and gets
+# combined with whatever the dialog collects.
+#
+# A UI-TIMING QUIRK, AND WHY WE USE A "CUSTOM EVENT" TO WORK AROUND IT:
+# You might expect CommandExecutedHandler (fires when the user clicks OK)
+# to be the natural place to just do the real work: read the checkboxes,
+# export the board, run ibom, show a result. That's what an earlier
+# version of this file did, and it caused the checkbox dialog to
+# visually stay on screen the ENTIRE time all of that was happening,
+# only disappearing once everything finally finished. Moving the work to
+# the command's "destroy" event (which fires once the dialog is supposed
+# to be done closing) didn't help either -- it turns out Fusion fires
+# execute and destroy back-to-back, synchronously, as part of the same
+# unbroken chain of code triggered by the user's click, so neither one
+# actually gives Fusion's UI a chance to repaint before we pile on more
+# work.
+#
+# The fix is Fusion's "Custom Event" mechanism: instead of calling our
+# slow function directly, we ask Fusion to run it LATER, on a fresh pass
+# through its own event loop, by "firing" a custom event and reacting to
+# it in a separate handler (RunExportHandler, below). That gap -- however
+# brief -- is enough for Fusion to actually finish closing the dialog
+# before our slow work begins.
+
+# A unique name for our custom event, registered once in run() (see
+# below) and fired every time the user clicks OK on the dialog.
+CUSTOM_EVENT_ID = 'pcbIbomExportRunEvent'
+
+# Unique IDs for each input on the dialog -- same idea as CMD_ID above,
+# an internal name Fusion uses to find each input again, never shown to
+# the user.
+INPUT_INCLUDE_TRACKS = 'includeTracks'
+INPUT_INCLUDE_NETS = 'includeNets'
+INPUT_DARK_MODE = 'darkMode'
+INPUT_EXTRA_FIELDS = 'extraFields'
+
 
 class CommandExecutedHandler(adsk.core.CommandEventHandler):
     def notify(self, args):
         try:
-            export_and_generate_bom()
+            # args.command is the same Command object CommandCreatedHandler
+            # built the dialog on; commandInputs.itemById() reads back
+            # whichever input we're asking about, by the ID strings
+            # defined above.
+            inputs = args.command.commandInputs
+
+            # .value on a checkbox input is a plain True/False. We build a
+            # small list of command-line flags out of whichever boxes
+            # ended up checked -- if a box isn't checked, its flag simply
+            # never gets added to the list.
+            dialog_args = []
+            if inputs.itemById(INPUT_INCLUDE_TRACKS).value:
+                dialog_args.append('--include-tracks')
+            if inputs.itemById(INPUT_INCLUDE_NETS).value:
+                dialog_args.append('--include-nets')
+            if inputs.itemById(INPUT_DARK_MODE).value:
+                dialog_args.append('--dark-mode')
+
+            # .value on a text input is just a string. .strip() removes
+            # any accidental leading/trailing spaces the user typed. We
+            # only add the flag at all if they actually typed something.
+            extra_fields = inputs.itemById(INPUT_EXTRA_FIELDS).value.strip()
+            if extra_fields:
+                dialog_args += ['--extra-fields', extra_fields]
+
+            # Combine what the dialog collected with whatever's in the
+            # EXTRA_IBOM_ARGS escape hatch near the top of this file.
+            ibom_args = dialog_args + EXTRA_IBOM_ARGS
+
+            # Fire the custom event instead of calling export_and_generate_bom()
+            # directly -- see the big comment above this class for why.
+            # fireCustomEvent()'s second argument must be a plain string,
+            # so we JSON-encode our list of flags; RunExportHandler
+            # decodes it back on the other end.
+            _app.fireCustomEvent(CUSTOM_EVENT_ID, json.dumps(ibom_args))
+        except Exception:
+            if _ui:
+                _ui.messageBox(f'Failed:\n{traceback.format_exc()}')
+
+
+class RunExportHandler(adsk.core.CustomEventHandler):
+    """
+    Reacts to the custom event fired by CommandExecutedHandler, above.
+    Because Fusion delivers custom events on a fresh pass through its own
+    event loop rather than synchronously inside whatever code fired them,
+    this is the one place in the whole add-in where it's actually safe to
+    do slow, blocking work (folder picker, board export, launching ibom,
+    result message box) without it visually fighting the checkbox dialog
+    for screen time.
+    """
+    def notify(self, event_args):
+        try:
+            # event_args.additionalInfo is the exact string we passed to
+            # fireCustomEvent() above; json.loads() turns it back into a
+            # real Python list.
+            ibom_args = json.loads(event_args.additionalInfo) if event_args.additionalInfo else []
+            export_and_generate_bom(ibom_args)
         except Exception:
             if _ui:
                 _ui.messageBox(f'Failed:\n{traceback.format_exc()}')
@@ -274,6 +408,27 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
     def notify(self, args):
         try:
             cmd = args.command
+            inputs = cmd.commandInputs
+
+            # addBoolValueInput(id, label, isCheckbox, iconFolder, default)
+            # -- passing True for isCheckbox gives a checkbox rather than
+            # a toggle button; an empty string for iconFolder means "use
+            # the default look, no custom icon"; the last argument is
+            # whether it starts checked or unchecked.
+            inputs.addBoolValueInput(
+                INPUT_INCLUDE_TRACKS, 'Include copper tracks', True, '', False
+            )
+            inputs.addBoolValueInput(
+                INPUT_INCLUDE_NETS, 'Include nets', True, '', False
+            )
+            inputs.addBoolValueInput(
+                INPUT_DARK_MODE, 'Dark mode', True, '', False
+            )
+            # addStringValueInput(id, label, default) -- a plain text box.
+            inputs.addStringValueInput(
+                INPUT_EXTRA_FIELDS, 'Extra fields (comma-separated)', ''
+            )
+
             on_execute = CommandExecutedHandler()
             cmd.execute.add(on_execute)
             # Keep a reference alive -- see the big comment in section 2
@@ -351,6 +506,23 @@ def run(context):
         _cmd_def.commandCreated.add(on_created)
         _handlers.append(on_created)
 
+        # Register our custom event (see the big comment in section 4 for
+        # why this exists) and connect RunExportHandler to it -- this is
+        # what actually does the export work, once CommandExecutedHandler
+        # fires it. unregisterCustomEvent() first clears out a stale
+        # leftover from a previous load of this add-in in the same
+        # session; it's wrapped in try/except because it errors if
+        # nothing was registered yet, which is the normal case on a
+        # completely fresh Fusion session.
+        try:
+            _app.unregisterCustomEvent(CUSTOM_EVENT_ID)
+        except Exception:
+            pass
+        custom_event = _app.registerCustomEvent(CUSTOM_EVENT_ID)
+        on_run_export = RunExportHandler()
+        custom_event.add(on_run_export)
+        _handlers.append(on_run_export)
+
         # Now actually build the tab/panel/button and place it in the UI.
         _attempt_placement()
 
@@ -398,6 +570,14 @@ def stop(context):
         cmd_def = ui.commandDefinitions.itemById(CMD_ID)
         if cmd_def:
             cmd_def.deleteMe()
+
+        # Clean up the custom event too, so a later Run in the same
+        # Fusion session starts from a clean slate instead of piling up
+        # duplicate registrations.
+        try:
+            adsk.core.Application.get().unregisterCustomEvent(CUSTOM_EVENT_ID)
+        except Exception:
+            pass
     except Exception:
         # Deliberately silent here (no message box): stop() often runs
         # while Fusion itself is in the middle of closing down, and
@@ -414,7 +594,13 @@ def stop(context):
 # connected to a clickable toolbar button. This function itself is normal,
 # top-to-bottom code -- no event-handler indirection here.
 
-def export_and_generate_bom():
+def export_and_generate_bom(ibom_args):
+    """
+    ibom_args: the list of extra generate_interactive_bom command-line
+    flags collected from the dialog's checkboxes/text field (plus
+    EXTRA_IBOM_ARGS), built by CommandExecutedHandler above and passed
+    straight through to run_ibom_pipeline() near the bottom of this file.
+    """
     ui = _ui
     temp_dir = None   # will hold the path to a scratch folder, created below
 
@@ -488,23 +674,32 @@ def export_and_generate_bom():
         # Look for the separate InteractiveHtmlBom tool on this computer.
         # See the _find_ibom_command() function below for exactly how and
         # why this search works the way it does.
-        ibom_cmd = _find_ibom_command(sys.executable)
+        ibom_cmd = _find_ibom_command()
         if ibom_cmd is None:
             # We deliberately do NOT try to silently install it for the
             # user -- see the comment on _find_ibom_command() for why.
-            # Instead we tell them the exact command to run themselves.
+            # Instead we tell them the exact command to run themselves,
+            # using a standalone Python -- not Fusion's own bundled one
+            # (see _find_ibom_command()'s comment for why that wouldn't
+            # work even if we tried to point at it).
+            install_cmd = (
+                "py -m pip install InteractiveHtmlBom wxpython jsonschema"
+                if os.name == "nt"
+                else "python3 -m pip install InteractiveHtmlBom wxpython jsonschema"
+            )
             ui.messageBox(
-                "InteractiveHtmlBom isn't installed for Fusion's Python.\n\n"
-                "Install it once from a terminal with:\n\n"
-                f'  "{sys.executable}" -m pip install '
-                "InteractiveHtmlBom wxpython jsonschema\n\n"
+                "InteractiveHtmlBom isn't installed where this add-in can find it.\n\n"
+                "Install it once, using a standalone Python on your system "
+                "PATH (not Fusion's own bundled Python) -- from a normal "
+                "terminal:\n\n"
+                f"  {install_cmd}\n\n"
                 "then click this button again."
             )
             return
 
         # Hand off to the helper function below, which actually launches
         # the external tool and reports back whether it succeeded.
-        run_ibom_pipeline(ibom_cmd, temp_brd, out_dir, design_name, element_count, ui)
+        run_ibom_pipeline(ibom_cmd, temp_brd, out_dir, design_name, element_count, ui, ibom_args)
 
     except Exception:
         # Catch-all safety net for this whole function.
@@ -524,71 +719,56 @@ def export_and_generate_bom():
 # 7. HELPER FUNCTIONS for launching the external InteractiveHtmlBom tool
 # ---------------------------------------------------------------------------
 
-def _find_ibom_command(python_exe):
+def _find_ibom_command():
     """
-    Figure out exactly how to launch the InteractiveHtmlBom program on
-    this particular computer, and return that as a list of strings
-    (a "command," in the format Python's subprocess module expects --
-    e.g. ['C:/path/to/generate_interactive_bom.exe'] or
-    ['/usr/local/bin/generate_interactive_bom']). Returns None if the
-    tool can't be found at all, meaning it isn't installed yet.
+    Locate the InteractiveHtmlBom program on this computer, and return it
+    as a list of strings (a "command," in the format Python's subprocess
+    module expects -- e.g. ['/usr/local/bin/generate_interactive_bom']).
+    Returns None if the tool can't be found, meaning it isn't installed
+    for a Python this add-in can actually reach.
 
-    WHY THIS IS MORE COMPLICATED THAN JUST TYPING THE COMMAND NAME:
-    When you install InteractiveHtmlBom with pip (Python's package
-    installer), it creates a small program file called
-    "generate_interactive_bom" and places it in a folder right next to
-    whichever Python interpreter you used to install it -- specifically a
-    subfolder called "Scripts" on Windows or "bin" on Mac/Linux.
-    Normally, that folder is also listed on your computer's PATH (the
-    list of folders the operating system searches when you type a
-    command name), so typing "generate_interactive_bom" in a normal
-    terminal just works.
+    THIS FUNCTION USED TO DO SOMETHING DIFFERENT AND WRONG, WORTH
+    EXPLAINING SINCE IT'S AN INSTRUCTIVE MISTAKE:
+    An earlier version of this add-in assumed that sys.executable (a
+    Python built-in that's supposed to give you "the path to the current
+    Python interpreter") would point at Fusion's own bundled Python, and
+    tried to look for the ibom tool in a "Scripts" folder right next to
+    it. That assumption was wrong in a way that's specific to how Fusion
+    works: Fusion *embeds* Python directly inside its own application
+    process, rather than launching a separate python.exe process the way
+    a normal terminal does. For an embedded interpreter like this,
+    sys.executable reports the path to the *host application* doing the
+    embedding -- i.e. Fusion360.exe itself -- not a Python interpreter at
+    all. So the old code was checking for a "Scripts" folder next to
+    Fusion360.exe, which was never going to exist, and the check silently
+    failed every single time without any indication anything was wrong.
+    (Caught and diagnosed by a user named Funkenjaeger, filed as an issue
+    against this project on GitHub -- not something we found ourselves.)
 
-    BUT: Fusion runs its own separate, bundled copy of Python, and that
-    copy's Scripts/bin folder is usually NOT on your system's PATH. So if
-    we just tried to run "generate_interactive_bom" directly, it would
-    likely fail with a "command not found" error, even though the tool
-    is correctly installed.
+    Even setting that mistake aside, installing packages into Fusion's
+    real bundled Python (which does exist, just not at the path the old
+    code was checking) wouldn't actually be a good idea anyway: Fusion
+    replaces that entire folder on every update, so anything installed
+    there would silently vanish the next time Fusion updates itself.
 
-    The fix: since we already know the exact path to Fusion's Python
-    interpreter (python_exe, passed in as sys.executable), we can figure
-    out exactly where pip would have placed the tool -- right next to
-    that same interpreter -- and check there directly, bypassing PATH
-    entirely. We only fall back to searching PATH (shutil.which) as a
-    second attempt, in case someone has set things up differently.
+    The only combination that actually works is a standalone Python
+    install (the kind you'd download from python.org, or get via your
+    OS's package manager) with its own Scripts/bin folder already on your
+    system's PATH -- which is exactly what shutil.which() checks for
+    below. This is simpler than the old logic, not just more correct:
+    there's no interpreter path to reason about at all anymore.
     """
-    # os.path.dirname() strips the filename off a path, leaving just the
-    # containing folder. E.g. "C:/Fusion/Python/python.exe" becomes
-    # "C:/Fusion/Python".
-    base = os.path.dirname(python_exe)
-
-    # os.name is 'nt' on Windows, something else (e.g. 'posix') on Mac/
-    # Linux -- we use this to pick the right subfolder name and file
-    # extension for each operating system.
-    candidate = os.path.join(
-        base, "Scripts" if os.name == "nt" else "bin",
-        "generate_interactive_bom.exe" if os.name == "nt" else "generate_interactive_bom",
-    )
-
-    if os.path.exists(candidate):
-        # Found it exactly where we expected. subprocess.run() (used
-        # later) wants a LIST of command pieces, even if there's only
-        # one, hence the square brackets.
-        return [candidate]
-
-    # Didn't find it next to Fusion's Python -- as a fallback, check
-    # whether it happens to be available on the normal system PATH after
-    # all (e.g. if the user installed it with a different, standalone
-    # Python and that one IS on PATH).
     found = shutil.which("generate_interactive_bom")
     if found:
+        # subprocess.run() (used later) wants a LIST of command pieces,
+        # even if there's only one, hence the square brackets.
         return [found]
 
     # Not found anywhere we know to look.
     return None
 
 
-def run_ibom_pipeline(ibom_cmd, brd_path, out_dir, design_name, count, ui):
+def run_ibom_pipeline(ibom_cmd, brd_path, out_dir, design_name, count, ui, ibom_args):
     """
     Actually launch the InteractiveHtmlBom tool as a separate program,
     wait for it to finish, and report the result to the user.
@@ -601,20 +781,25 @@ def run_ibom_pipeline(ibom_cmd, brd_path, out_dir, design_name, count, ui):
               tool from mixing up unrelated boards if run repeatedly.
     count:    number of components, purely for the success message.
     ui:       Fusion's UserInterface object, so we can show message boxes.
+    ibom_args: extra command-line flags -- whatever the dialog's
+              checkboxes/text field collected, combined with
+              EXTRA_IBOM_ARGS, built by export_and_generate_bom() and
+              passed straight through from there.
     """
     # Build the full command line as a list of strings. This is
     # equivalent to typing, in a terminal:
     #   generate_interactive_bom  <brd_path>  --dest-dir <out_dir>
-    #       --name-format <design_name>  --no-browser
+    #       --name-format <design_name>  --no-browser  <your extra flags>
     # "--no-browser" stops the tool from automatically popping open a web
     # browser window itself -- we'd rather just tell the user where the
-    # file ended up.
+    # file ended up. ibom_args (whatever the dialog collected, plus
+    # EXTRA_IBOM_ARGS) is tacked on at the end.
     cmd = ibom_cmd + [
         brd_path,
         "--dest-dir", out_dir,
         "--name-format", design_name,
         "--no-browser",
-    ]
+    ] + ibom_args
 
     # subprocess.run() launches "cmd" as its own separate program and
     # waits (blocks) until it finishes before continuing.
